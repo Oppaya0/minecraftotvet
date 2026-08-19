@@ -79,6 +79,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest-build
+          target_commitish: ${{ github.sha }}
           name: "Последняя сборка"
           body: |
             Автосборка ветки `claude/minecraft-auto-responder-czeo7q`.
@@ -91,4 +92,6 @@ jobs:
             minecraftotvet-compiled.zip
             minecraftotvet-source.zip
           make_latest: "true"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
