@@ -177,6 +177,7 @@ class Settings:
     ignore_own_username: str = ""      # ваш ник, чтобы не отвечать себе
     type_interval: float = 0.02        # пауза между нажатиями клавиш (реалистичный ввод)
     block_user_input: bool = True      # блокировать клавиатуру/мышь пользователя во время печати бота
+    auto_focus: bool = True            # автоматически переключаться на окно Minecraft перед ответом
     remote_quiz_url: str = ""          # URL общей викторины (JSON вида {"вопрос": "ответ"})
     remote_quiz_interval_min: int = 60 # как часто скачивать обновления, в минутах
 
@@ -200,6 +201,7 @@ class Config:
             ignore_own_username=str(s.get("ignore_own_username", "")),
             type_interval=float(s.get("type_interval", 0.02)),
             block_user_input=bool(s.get("block_user_input", True)),
+            auto_focus=bool(s.get("auto_focus", True)),
             remote_quiz_url=str(s.get("remote_quiz_url", "")),
             remote_quiz_interval_min=int(s.get("remote_quiz_interval_min", 60)),
         )
@@ -373,6 +375,36 @@ def _block_user_input(block: bool) -> bool:
         return bool(ctypes.windll.user32.BlockInput(bool(block)))
     except Exception:
         return False
+
+
+def _focus_minecraft() -> bool:
+    """Находит окно с «Minecraft» в заголовке и переключает на него (Windows).
+    Возвращает True если окно найдено и активировано."""
+    if os.name != "nt":
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = [None]
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        def cb(h, _):
+            if user32.IsWindowVisible(h):
+                buf = ctypes.create_unicode_buffer(256)
+                user32.GetWindowTextW(h, buf, 256)
+                if "minecraft" in buf.value.lower():
+                    hwnd[0] = h
+                    return False
+            return True
+
+        user32.EnumWindows(cb, 0)
+        if hwnd[0]:
+            user32.ShowWindow(hwnd[0], 9)  # SW_RESTORE
+            user32.SetForegroundWindow(hwnd[0])
+            time.sleep(0.3)
+            return True
+    except Exception:
+        pass
+    return False
 
 
 class Typist:
@@ -593,8 +625,12 @@ def main() -> None:
             cfg.load()  # подтянуть свежий responses.json
     except Exception as e:
         print(f"[collect] Ошибка сбора вопросов: {e}", file=sys.stderr)
-    print("Готов к работе. Не закрывайте окно — держите Minecraft в фокусе, "
-          "чтобы бот мог печатать в чат.\n")
+    if cfg.settings.auto_focus:
+        print("Готов к работе. Окно Minecraft будет активировано автоматически "
+              "перед ответом — можно работать в другом окне.\n")
+    else:
+        print("Готов к работе. Держите Minecraft в фокусе, чтобы бот мог "
+              "печатать в чат.\n")
 
     typist = Typist(cfg.settings)
 
@@ -631,6 +667,8 @@ def main() -> None:
             blocked = maybe_block(cfg.settings)
             try:
                 time.sleep(delay)
+                if cfg.settings.auto_focus:
+                    _focus_minecraft()
                 typist.send_chat(math_reply)
             except Exception as e:
                 print(f"[bot]  ошибка отправки: {e}", file=sys.stderr)
@@ -654,6 +692,8 @@ def main() -> None:
                 blocked = maybe_block(cfg.settings)
                 try:
                     time.sleep(delay)
+                    if cfg.settings.auto_focus:
+                        _focus_minecraft()
                     typist.send_chat(reply)
                 except Exception as e:
                     print(f"[bot]  ошибка отправки: {e}", file=sys.stderr)
