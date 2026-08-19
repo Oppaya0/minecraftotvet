@@ -435,7 +435,16 @@ class Typist:
         time.sleep(0.25)
 
         if _copy_to_clipboard(message):
+            a_key = KeyCode.from_vk(0x41)
             v_key = KeyCode.from_vk(0x56)
+            # Ctrl+A — выделить всё (убирает лишний символ от клавиши чата
+            # на русской раскладке, где T → "е").
+            self.kb.press(Key.ctrl_l)
+            self.kb.press(a_key)
+            self.kb.release(a_key)
+            self.kb.release(Key.ctrl_l)
+            time.sleep(0.05)
+            # Ctrl+V — вставка заменяет выделение.
             self.kb.press(Key.ctrl_l)
             self.kb.press(v_key)
             self.kb.release(v_key)
