@@ -257,9 +257,8 @@ class Config:
                 print(f"[config] Не удалось прочитать remote_quiz.json: {e}",
                       file=sys.stderr)
 
-        # Локальный "черновик" — вопросы, собранные из старых логов.
-        # Записи с пустым ответом игнорируются (см. _add_quiz), так что
-        # пользователь спокойно заполняет их вручную по мере игры.
+        # Обратная совместимость: если у пользователя ещё остался старый
+        # pending_quiz.json — тоже подхватим, пустые ответы игнорируются.
         pending_path = self.path.with_name("pending_quiz.json")
         n_pending = 0
         if pending_path.exists():
@@ -267,9 +266,8 @@ class Config:
                 pending = json.loads(pending_path.read_text(encoding="utf-8"))
                 if isinstance(pending, dict):
                     n_pending = _add_quiz(pending)
-            except Exception as e:
-                print(f"[config] Не удалось прочитать pending_quiz.json: {e}",
-                      file=sys.stderr)
+            except Exception:
+                pass
 
         # Более специфичные (длинные) триггеры проверяются раньше — иначе
         # общий триггер вроде "Викторина" мог бы перебить конкретный вопрос.
@@ -277,9 +275,9 @@ class Config:
 
         self.rules = rules
         self.mtime = self.path.stat().st_mtime
+        extra = f", legacy pending: {n_pending}" if n_pending else ""
         print(f"[config] Загружено правил: {len(self.rules)} "
-              f"(локальный quiz: {n_local}, общий quiz: {n_remote}, "
-              f"собранный quiz: {n_pending})")
+              f"(локальный quiz: {n_local}, общий quiz: {n_remote}{extra})")
 
     def maybe_reload(self) -> None:
         try:
@@ -431,19 +429,26 @@ def _iter_log_lines(folder: Path):
 
 
 def collect_pending_questions(log_folder: Path, known_questions: set[str],
-                              dest: Path) -> int:
-    """Проходит по старым логам, вытаскивает уникальные вопросы викторины
-    и записывает их в dest (pending_quiz.json) как {"вопрос": ""}.
-    Уже существующие в dest вопросы (даже с заполненным ответом) сохраняются.
-    Возвращает количество новых записей."""
-    existing: dict[str, str] = {}
-    if dest.exists():
-        try:
-            data = json.loads(dest.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                existing = {str(k): str(v) for k, v in data.items()}
-        except Exception:
-            pass
+                              config_path: Path) -> int:
+    """Проходит по старым логам, вытаскивает уникальные вопросы викторины,
+    добавляет их прямо в quiz внутри responses.json как "вопрос": "".
+    Пустые ответы бот игнорирует, так что вопросы можно заполнять по мере
+    игры прямо в основном файле. Возвращает количество новых записей."""
+    if not config_path.exists():
+        return 0
+    try:
+        cfg_data = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"[collect] Не удалось прочитать {config_path.name}: {e}",
+              file=sys.stderr)
+        return 0
+    if not isinstance(cfg_data, dict):
+        return 0
+
+    quiz = cfg_data.get("quiz")
+    if not isinstance(quiz, dict):
+        quiz = {}
+        cfg_data["quiz"] = quiz
 
     found: set[str] = set()
     for line in _iter_log_lines(log_folder):
@@ -454,33 +459,32 @@ def collect_pending_questions(log_folder: Path, known_questions: set[str],
             continue
         i = line.find(_QUIZ_LINE_MARK)
         text = line[i + len(_QUIZ_LINE_MARK):].strip()
-        # Обрезаем возможный служебный хвост (цвета, «!», конец строки).
         text = text.rstrip("\r\n\t ")
         if not text:
             continue
         low_text = text.lower()
         if any(m in low_text for m in _MATH_SKIP):
             continue
-        # Уже знаем ответ в quiz/remote_quiz — не добавляем.
+        # Уже есть в локальном quiz (в т.ч. с пустым ответом) или в
+        # известных источниках (remote_quiz) — пропускаем.
+        if text in quiz:
+            continue
         if any(k.lower() in low_text or low_text in k.lower()
                for k in known_questions):
             continue
         found.add(text)
 
-    new = {q: "" for q in found if q not in existing}
-    if not new and not existing:
+    if not found:
         return 0
 
-    merged = dict(existing)
-    for q in sorted(new.keys()):
-        merged[q] = ""
+    for q in sorted(found):
+        quiz[q] = ""
 
-    if merged != existing:
-        dest.write_text(
-            json.dumps(merged, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-    return len(new)
+    config_path.write_text(
+        json.dumps(cfg_data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return len(found)
 
 
 def fetch_remote_quiz(url: str, dest: Path) -> bool:
@@ -576,17 +580,17 @@ def main() -> None:
 
     start_remote_updater(cfg)
 
-    # Разово при старте: собрать все вопросы викторины из старых архивных
-    # логов рядом с latest.log и добавить их в pending_quiz.json с пустым
-    # ответом. Пользователь потом сам вписывает правильные ответы.
+    # Разово при старте: собрать все вопросы викторины из архивных логов
+    # рядом с latest.log и добавить их прямо в responses.json → quiz с
+    # пустым ответом. Пустые ответы бот игнорирует, так что просто
+    # открой responses.json и допиши правильные — подтянутся на лету.
     try:
         known = {r.triggers[0] for r in cfg.rules if r.triggers}
-        pending_dest = CONFIG_PATH.with_name("pending_quiz.json")
-        added = collect_pending_questions(log_path.parent, known, pending_dest)
+        added = collect_pending_questions(log_path.parent, known, CONFIG_PATH)
         if added:
             print(f"[collect] Собрано новых вопросов из логов: {added}. "
-                  f"Открой {pending_dest.name} и впиши ответы.")
-            cfg.load()  # подтянуть свежий pending_quiz.json
+                  f"Открой {CONFIG_PATH.name} → секция \"quiz\" и впиши ответы.")
+            cfg.load()  # подтянуть свежий responses.json
     except Exception as e:
         print(f"[collect] Ошибка сбора вопросов: {e}", file=sys.stderr)
     print("Готов к работе. Не закрывайте окно — держите Minecraft в фокусе, "
