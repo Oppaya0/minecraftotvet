@@ -242,37 +242,25 @@ class Config:
                 n += 1
             return n
 
-        local_quiz = raw.get("quiz", {})
-        n_local = _add_quiz(local_quiz) if isinstance(local_quiz, dict) else 0
+        quiz = raw.get("quiz", {})
+        if not isinstance(quiz, dict):
+            quiz = {}
+        n_quiz = _add_quiz(quiz)
 
-        # Общая викторина, автоматически скачиваемая с URL.
-        # Файл remote_quiz.json пишется фоновым потоком в папке рядом с
-        # main.py/exe. Локальные вопросы (сверху) имеют приоритет —
-        # если один и тот же ключ есть и там, и там, обе записи попадут
-        # в правила, но локальная стоит раньше и, при равной длине
-        # триггера, обычно сработает первой.
-        remote_path = self.path.with_name("remote_quiz.json")
-        n_remote = 0
-        if remote_path.exists():
-            try:
-                remote = json.loads(remote_path.read_text(encoding="utf-8"))
-                if isinstance(remote, dict):
-                    n_remote = _add_quiz(remote)
-            except Exception as e:
-                print(f"[config] Не удалось прочитать remote_quiz.json: {e}",
-                      file=sys.stderr)
-
-        # Обратная совместимость: если у пользователя ещё остался старый
-        # pending_quiz.json — тоже подхватим, пустые ответы игнорируются.
-        pending_path = self.path.with_name("pending_quiz.json")
-        n_pending = 0
-        if pending_path.exists():
-            try:
-                pending = json.loads(pending_path.read_text(encoding="utf-8"))
-                if isinstance(pending, dict):
-                    n_pending = _add_quiz(pending)
-            except Exception:
-                pass
+        # Пересортировка quiz: с ответами первыми, без — в конце.
+        sorted_quiz = dict(sorted(
+            quiz.items(),
+            key=lambda kv: (not kv[1].strip() if isinstance(kv[1], str) else True,
+                            kv[0].lower()),
+        ))
+        if list(sorted_quiz.keys()) != list(quiz.keys()):
+            raw["quiz"] = sorted_quiz
+            self._saving = True
+            self.path.write_text(
+                json.dumps(raw, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            self._saving = False
 
         # Более специфичные (длинные) триггеры проверяются раньше — иначе
         # общий триггер вроде "Викторина" мог бы перебить конкретный вопрос.
@@ -280,27 +268,16 @@ class Config:
 
         self.rules = rules
         self.mtime = self.path.stat().st_mtime
-        extra = f", legacy pending: {n_pending}" if n_pending else ""
-        print(f"[config] Загружено правил: {len(self.rules)} "
-              f"(локальный quiz: {n_local}, общий quiz: {n_remote}{extra})")
+        print(f"[config] Загружено правил: {len(self.rules)} (quiz: {n_quiz})")
 
     def maybe_reload(self) -> None:
         try:
             m = self.path.stat().st_mtime
         except OSError:
             return
-        remote_path = self.path.with_name("remote_quiz.json")
-        pending_path = self.path.with_name("pending_quiz.json")
-        remote_m = remote_path.stat().st_mtime if remote_path.exists() else 0.0
-        pending_m = pending_path.stat().st_mtime if pending_path.exists() else 0.0
-        remote_prev = getattr(self, "_remote_mtime", 0.0)
-        pending_prev = getattr(self, "_pending_mtime", 0.0)
-        if (m != self.mtime or remote_m != remote_prev
-                or pending_m != pending_prev):
+        if m != self.mtime and not getattr(self, "_saving", False):
             try:
                 self.load()
-                self._remote_mtime = remote_m
-                self._pending_mtime = pending_m
             except Exception as e:
                 print(f"[config] Ошибка перезагрузки: {e}", file=sys.stderr)
 
