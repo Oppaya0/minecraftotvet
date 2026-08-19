@@ -391,7 +391,7 @@ def _focus_minecraft() -> bool:
             if user32.IsWindowVisible(h):
                 buf = ctypes.create_unicode_buffer(256)
                 user32.GetWindowTextW(h, buf, 256)
-                if "minecraft" in buf.value.lower():
+                if "lemoncraft" in buf.value.lower():
                     hwnd[0] = h
                     return False
             return True
