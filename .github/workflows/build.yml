@@ -80,3 +80,4 @@ jobs:
             minecraftotvet-compiled.zip
             minecraftotvet-source.zip
           make_latest: "true"
+
