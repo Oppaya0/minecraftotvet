@@ -1,7 +1,7 @@
 {
   "settings": {
-    "min_delay": 2.50,
-    "max_delay": 4.00,
+    "min_delay": 1.50,
+    "max_delay": 3.00,
     "log_path": "%APPDATA%\\LemonCraft\\updates\\BloodMagic\\logs\\latest.log",
     "chat_key": "t",
     "type_interval": 0.02,

@@ -15,6 +15,7 @@ responses.json и отправляет ответ в игровой чат че�
 from __future__ import annotations
 
 import ctypes
+import gzip
 import json
 import os
 import random
@@ -218,10 +219,17 @@ class Config:
         def _add_quiz(mapping: dict) -> int:
             n = 0
             for question, answer in mapping.items():
-                replies = answer if isinstance(answer, list) else [str(answer)]
+                # Пропускаем записи с пустым ответом (например, из pending_quiz.json,
+                # где вопросы ждут заполнения пользователем).
+                if isinstance(answer, list):
+                    replies = [str(r) for r in answer if str(r).strip()]
+                else:
+                    replies = [str(answer)] if str(answer).strip() else []
+                if not replies:
+                    continue
                 rules.append(Rule(
                     triggers=[str(question)],
-                    replies=[str(r) for r in replies],
+                    replies=replies,
                     match="contains",
                     case_sensitive=False,
                     cooldown=0.0,
@@ -249,6 +257,20 @@ class Config:
                 print(f"[config] Не удалось прочитать remote_quiz.json: {e}",
                       file=sys.stderr)
 
+        # Локальный "черновик" — вопросы, собранные из старых логов.
+        # Записи с пустым ответом игнорируются (см. _add_quiz), так что
+        # пользователь спокойно заполняет их вручную по мере игры.
+        pending_path = self.path.with_name("pending_quiz.json")
+        n_pending = 0
+        if pending_path.exists():
+            try:
+                pending = json.loads(pending_path.read_text(encoding="utf-8"))
+                if isinstance(pending, dict):
+                    n_pending = _add_quiz(pending)
+            except Exception as e:
+                print(f"[config] Не удалось прочитать pending_quiz.json: {e}",
+                      file=sys.stderr)
+
         # Более специфичные (длинные) триггеры проверяются раньше — иначе
         # общий триггер вроде "Викторина" мог бы перебить конкретный вопрос.
         rules.sort(key=lambda r: -max((len(t) for t in r.triggers), default=0))
@@ -256,7 +278,8 @@ class Config:
         self.rules = rules
         self.mtime = self.path.stat().st_mtime
         print(f"[config] Загружено правил: {len(self.rules)} "
-              f"(локальный quiz: {n_local}, общий quiz: {n_remote})")
+              f"(локальный quiz: {n_local}, общий quiz: {n_remote}, "
+              f"собранный quiz: {n_pending})")
 
     def maybe_reload(self) -> None:
         try:
@@ -264,14 +287,17 @@ class Config:
         except OSError:
             return
         remote_path = self.path.with_name("remote_quiz.json")
+        pending_path = self.path.with_name("pending_quiz.json")
         remote_m = remote_path.stat().st_mtime if remote_path.exists() else 0.0
-        # mtime сохраняется только для основного файла — для remote_quiz
-        # используем "прошлое значение" через атрибут.
+        pending_m = pending_path.stat().st_mtime if pending_path.exists() else 0.0
         remote_prev = getattr(self, "_remote_mtime", 0.0)
-        if m != self.mtime or remote_m != remote_prev:
+        pending_prev = getattr(self, "_pending_mtime", 0.0)
+        if (m != self.mtime or remote_m != remote_prev
+                or pending_m != pending_prev):
             try:
                 self.load()
                 self._remote_mtime = remote_m
+                self._pending_mtime = pending_m
             except Exception as e:
                 print(f"[config] Ошибка перезагрузки: {e}", file=sys.stderr)
 
@@ -375,6 +401,88 @@ class Typist:
         self.kb.release(Key.enter)
 
 
+# --- Сбор вопросов викторины из архивных логов -----------------------------
+
+# Строка чата, содержащая вопрос викторины.
+_QUIZ_LINE_MARK = "[Викторина]"
+# Служебные строки, которые не являются вопросами.
+_QUIZ_SKIP_SUBSTR = ("победил", "правильный ответ", "викторина окончена",
+                     "начинается", "начинаем", "закончилась")
+# Математические вопросы решает встроенный калькулятор, вручную не нужны.
+_MATH_SKIP = ("сколько будет", "чему равно", "посчитай")
+
+
+def _iter_log_lines(folder: Path):
+    """Итерирует по строкам всех *.log и *.log.gz в папке (не рекурсивно)."""
+    if not folder.is_dir():
+        return
+    for p in folder.iterdir():
+        try:
+            if p.suffix == ".log":
+                with p.open("r", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        yield line
+            elif p.name.endswith(".log.gz"):
+                with gzip.open(p, "rt", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        yield line
+        except Exception as e:
+            print(f"[collect] Ошибка чтения {p.name}: {e}", file=sys.stderr)
+
+
+def collect_pending_questions(log_folder: Path, known_questions: set[str],
+                              dest: Path) -> int:
+    """Проходит по старым логам, вытаскивает уникальные вопросы викторины
+    и записывает их в dest (pending_quiz.json) как {"вопрос": ""}.
+    Уже существующие в dest вопросы (даже с заполненным ответом) сохраняются.
+    Возвращает количество новых записей."""
+    existing: dict[str, str] = {}
+    if dest.exists():
+        try:
+            data = json.loads(dest.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                existing = {str(k): str(v) for k, v in data.items()}
+        except Exception:
+            pass
+
+    found: set[str] = set()
+    for line in _iter_log_lines(log_folder):
+        if _QUIZ_LINE_MARK not in line:
+            continue
+        low = line.lower()
+        if any(s in low for s in _QUIZ_SKIP_SUBSTR):
+            continue
+        i = line.find(_QUIZ_LINE_MARK)
+        text = line[i + len(_QUIZ_LINE_MARK):].strip()
+        # Обрезаем возможный служебный хвост (цвета, «!», конец строки).
+        text = text.rstrip("\r\n\t ")
+        if not text:
+            continue
+        low_text = text.lower()
+        if any(m in low_text for m in _MATH_SKIP):
+            continue
+        # Уже знаем ответ в quiz/remote_quiz — не добавляем.
+        if any(k.lower() in low_text or low_text in k.lower()
+               for k in known_questions):
+            continue
+        found.add(text)
+
+    new = {q: "" for q in found if q not in existing}
+    if not new and not existing:
+        return 0
+
+    merged = dict(existing)
+    for q in sorted(new.keys()):
+        merged[q] = ""
+
+    if merged != existing:
+        dest.write_text(
+            json.dumps(merged, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    return len(new)
+
+
 def fetch_remote_quiz(url: str, dest: Path) -> bool:
     """Скачивает удалённый файл викторины (JSON вида {"вопрос": "ответ"})
     и, если он валиден и отличается от локального, сохраняет в dest.
@@ -446,6 +554,20 @@ def main() -> None:
     print(f"[log] Слежу за файлом: {log_path}")
     print(f"[config] Слежу за конфигом: {CONFIG_PATH}")
     start_remote_updater(cfg)
+
+    # Разово при старте: собрать все вопросы викторины из старых архивных
+    # логов рядом с latest.log и добавить их в pending_quiz.json с пустым
+    # ответом. Пользователь потом сам вписывает правильные ответы.
+    try:
+        known = {r.triggers[0] for r in cfg.rules if r.triggers}
+        pending_dest = CONFIG_PATH.with_name("pending_quiz.json")
+        added = collect_pending_questions(log_path.parent, known, pending_dest)
+        if added:
+            print(f"[collect] Собрано новых вопросов из логов: {added}. "
+                  f"Открой {pending_dest.name} и впиши ответы.")
+            cfg.load()  # подтянуть свежий pending_quiz.json
+    except Exception as e:
+        print(f"[collect] Ошибка сбора вопросов: {e}", file=sys.stderr)
     print("Готов к работе. Не закрывайте окно — держите Minecraft в фокусе, "
           "чтобы бот мог печатать в чат.\n")
 
