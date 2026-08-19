@@ -577,9 +577,45 @@ def collect_pending_questions(log_folder: Path, known_questions: set[str],
     return len(found)
 
 
-def fetch_remote_quiz(url: str, dest: Path) -> bool:
+def _merge_quiz_into_config(source: dict[str, str], config_path: Path) -> int:
+    """Мержит вопросы из source в responses.json → quiz.
+    Новые вопросы добавляются; пустые ответы заменяются непустыми.
+    Возвращает количество добавленных/обновлённых записей."""
+    try:
+        cfg_data = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return 0
+    if not isinstance(cfg_data, dict):
+        return 0
+
+    quiz = cfg_data.get("quiz")
+    if not isinstance(quiz, dict):
+        quiz = {}
+        cfg_data["quiz"] = quiz
+
+    changed = 0
+    for q, a in source.items():
+        q = q.strip()
+        a_str = str(a).strip() if a else ""
+        if q not in quiz:
+            quiz[q] = a_str
+            changed += 1
+        elif not quiz[q] and a_str:
+            quiz[q] = a_str
+            changed += 1
+
+    if changed:
+        config_path.write_text(
+            json.dumps(cfg_data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    return changed
+
+
+def fetch_remote_quiz(url: str, dest: Path, config_path: Path | None = None) -> bool:
     """Скачивает удалённый файл викторины (JSON вида {"вопрос": "ответ"})
     и, если он валиден и отличается от локального, сохраняет в dest.
+    Если указан config_path — мержит вопросы в responses.json → quiz.
     Возвращает True при успешном обновлении."""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "minecraftotvet/1.0"})
@@ -594,6 +630,10 @@ def fetch_remote_quiz(url: str, dest: Path) -> bool:
             return False
         dest.write_text(data, encoding="utf-8")
         print(f"[remote] Обновлено {len(parsed)} записей викторины: {dest.name}")
+        if config_path:
+            merged = _merge_quiz_into_config(parsed, config_path)
+            if merged:
+                print(f"[remote] Добавлено/обновлено в responses.json: {merged}")
         return True
     except Exception as e:
         print(f"[remote] Ошибка обновления с {url}: {e}", file=sys.stderr)
@@ -607,7 +647,7 @@ def sync_remote_quiz(cfg: Config) -> bool:
     if not url:
         return False
     dest = cfg.path.with_name("remote_quiz.json")
-    return fetch_remote_quiz(url, dest)
+    return fetch_remote_quiz(url, dest, cfg.path)
 
 
 def start_remote_updater(cfg: Config) -> None:
@@ -622,7 +662,7 @@ def start_remote_updater(cfg: Config) -> None:
             time.sleep(interval_min * 60)
             url = cfg.settings.remote_quiz_url.strip()
             if url:
-                fetch_remote_quiz(url, dest)
+                fetch_remote_quiz(url, dest, cfg.path)
 
     if cfg.settings.remote_quiz_url.strip():
         t = threading.Thread(target=loop, name="remote-quiz-updater", daemon=True)
