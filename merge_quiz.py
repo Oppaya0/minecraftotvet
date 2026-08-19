@@ -26,7 +26,13 @@ import sys
 from pathlib import Path
 
 
-HERE = Path(__file__).resolve().parent
+# В скомпилированной версии (PyInstaller onefile) __file__ — во временной
+# папке распаковки; рядом с .exe лежат наши JSON. В обычном запуске Python
+# берём папку скрипта.
+if getattr(sys, "frozen", False):
+    HERE = Path(sys.executable).resolve().parent
+else:
+    HERE = Path(__file__).resolve().parent
 MY_CONFIG = HERE / "responses.json"
 MY_PENDING = HERE / "pending_quiz.json"
 
