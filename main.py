@@ -74,6 +74,9 @@ SYSTEM_CHAT_PATTERN = re.compile(
     r"\[(?:Render thread|Client thread|Chat)/INFO\]:\s*(?P<text>.+)$"
 )
 
+# Minecraft §-коды форматирования (§a, §l, §r и т.д.) — убираем из текста.
+_MC_COLOR_CODE = re.compile(r"§[0-9a-fk-or]", re.IGNORECASE)
+
 
 # --- Мини-калькулятор для вопросов "Сколько будет ..." ----------------------
 
@@ -343,14 +346,19 @@ def follow(path: Path):
             inode = new_inode
 
 
+def _strip_mc_codes(s: str) -> str:
+    """Убирает Minecraft §-коды форматирования из строки."""
+    return _MC_COLOR_CODE.sub("", s)
+
+
 def parse_chat(line: str) -> tuple[str, str] | None:
     for pat in CHAT_PATTERNS:
         m = pat.search(line)
         if m:
-            return m.group("nick"), m.group("text").strip()
+            return m.group("nick"), _strip_mc_codes(m.group("text")).strip()
     m = SYSTEM_CHAT_PATTERN.search(line)
     if m:
-        text = m.group("text").strip()
+        text = _strip_mc_codes(m.group("text")).strip()
         # Отсеиваем очевидно неигровые строки клиента.
         low = text.lower()
         noisy = ("loaded", "saving", "stopping", "starting", "compil",
