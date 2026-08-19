@@ -1,0 +1,18 @@
+{
+  "settings": {
+    "min_delay": 2.50,
+    "max_delay": 4.00,
+    "log_path": "%APPDATA%\\LemonCraft\\updates\\BloodMagic\\logs\\latest.log",
+    "chat_key": "t",
+    "type_interval": 0.02,
+    "block_user_input": true,
+    "remote_quiz_url": "https://raw.githubusercontent.com/Oppaya0/minecraftotvet/refs/heads/claude/minecraft-auto-responder-czeo7q/quiz_shared.json",
+    "remote_quiz_interval_min": 120
+  },
+
+  "quiz": {
+
+    
+
+  }
+}

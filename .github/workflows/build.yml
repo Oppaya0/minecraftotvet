@@ -1,0 +1,82 @@
+name: build-exe
+
+on:
+  push:
+    branches: [claude/minecraft-auto-responder-czeo7q]
+    paths:
+      - "main.py"
+      - "requirements.txt"
+      - "build.bat"
+      - "responses.json"
+      - "quiz_shared.json"
+      - "запустить.bat"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller pynput
+
+      - name: Build .exe
+        run: |
+          python -m PyInstaller --noconfirm --onefile --console --name minecraftotvet --uac-admin main.py
+
+      - name: Pack "compiled" archive (exe + config)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release-compiled | Out-Null
+          Copy-Item dist\minecraftotvet.exe    release-compiled\
+          Copy-Item responses.json             release-compiled\
+          Copy-Item quiz_shared.json           release-compiled\
+          Compress-Archive -Path release-compiled\* -DestinationPath minecraftotvet-compiled.zip -Force
+
+      - name: Pack "source" archive (python-скрипт + запускалка)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release-source | Out-Null
+          Copy-Item main.py            release-source\
+          Copy-Item requirements.txt   release-source\
+          Copy-Item responses.json     release-source\
+          Copy-Item quiz_shared.json   release-source\
+          Copy-Item build.bat          release-source\
+          Copy-Item "запустить.bat"    release-source\
+          Compress-Archive -Path release-source\* -DestinationPath minecraftotvet-source.zip -Force
+
+      - name: Upload as workflow artifacts (для просмотра из GitHub Actions)
+        uses: actions/upload-artifact@v4
+        with:
+          name: minecraftotvet-builds
+          path: |
+            minecraftotvet-compiled.zip
+            minecraftotvet-source.zip
+
+      - name: Publish/update GitHub Release "latest-build"
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-build
+          name: "Последняя сборка"
+          body: |
+            Автосборка ветки `claude/minecraft-auto-responder-czeo7q`.
+
+            - **minecraftotvet-compiled.zip** — готовый `.exe` (Python устанавливать НЕ нужно). Распаковать, запустить `minecraftotvet.exe`.
+            - **minecraftotvet-source.zip** — исходники + `запустить.bat` (требует установленный Python 3.11 и права администратора).
+          files: |
+            minecraftotvet-compiled.zip
+            minecraftotvet-source.zip
+          make_latest: "true"
