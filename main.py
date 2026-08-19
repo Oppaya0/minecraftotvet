@@ -415,6 +415,36 @@ def _focus_minecraft() -> bool:
     return False
 
 
+def _copy_to_clipboard(text: str) -> bool:
+    """Копирует текст в буфер обмена Windows (CF_UNICODETEXT).
+    Работает независимо от раскладки клавиатуры."""
+    if os.name != "nt":
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GlobalAlloc.restype = ctypes.c_void_p
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+
+        if not user32.OpenClipboard(0):
+            return False
+        try:
+            user32.EmptyClipboard()
+            encoded = text.encode("utf-16-le") + b"\x00\x00"
+            h = kernel32.GlobalAlloc(0x0002, len(encoded))
+            if not h:
+                return False
+            p = kernel32.GlobalLock(h)
+            ctypes.memmove(p, encoded, len(encoded))
+            kernel32.GlobalUnlock(h)
+            user32.SetClipboardData(13, h)
+            return True
+        finally:
+            user32.CloseClipboard()
+    except Exception:
+        return False
+
+
 class Typist:
     def __init__(self, settings: Settings):
         self.kb = Controller()
@@ -422,19 +452,28 @@ class Typist:
 
     def send_chat(self, message: str) -> None:
         s = self.settings
-        # Открыть чат. Клавишу передаём как VK-код — иначе на русской
-        # раскладке `t` уходит как «е» и чат не открывается.
         key = _chat_key(s.chat_key)
         self.kb.press(key)
         self.kb.release(key)
         time.sleep(0.25)
-        # Ввести текст посимвольно с небольшой паузой
-        for ch in message:
-            self.kb.type(ch)
-            if s.type_interval > 0:
-                time.sleep(s.type_interval)
+
+        if _copy_to_clipboard(message):
+            # Вставка через Ctrl+V — работает на любой раскладке.
+            # VK_V (0x56) используем через VK-код, чтобы Ctrl+V
+            # сработал независимо от раскладки (иначе на русской
+            # Ctrl+'v' = Ctrl+'м' и вставка не работает).
+            v_key = KeyCode.from_vk(0x56)
+            self.kb.press(Key.ctrl_l)
+            self.kb.press(v_key)
+            self.kb.release(v_key)
+            self.kb.release(Key.ctrl_l)
+        else:
+            for ch in message:
+                self.kb.type(ch)
+                if s.type_interval > 0:
+                    time.sleep(s.type_interval)
+
         time.sleep(0.05)
-        # Отправить
         self.kb.press(Key.enter)
         self.kb.release(Key.enter)
 
