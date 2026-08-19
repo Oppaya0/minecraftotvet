@@ -521,9 +521,8 @@ def _iter_log_lines(folder: Path):
 def collect_pending_questions(log_folder: Path, known_questions: set[str],
                               config_path: Path) -> int:
     """Проходит по старым логам, вытаскивает уникальные вопросы викторины,
-    добавляет их прямо в quiz внутри responses.json как "вопрос": "".
-    Пустые ответы бот игнорирует, так что вопросы можно заполнять по мере
-    игры прямо в основном файле. Возвращает количество новых записей."""
+    добавляет их в responses.json → quiz с пустым ответом.
+    Возвращает количество новых записей."""
     if not config_path.exists():
         return 0
     try:
@@ -535,12 +534,11 @@ def collect_pending_questions(log_folder: Path, known_questions: set[str],
     if not isinstance(cfg_data, dict):
         return 0
 
-    quiz = cfg_data.get("quiz")
+    quiz = cfg_data.get("quiz", {})
     if not isinstance(quiz, dict):
         quiz = {}
-        cfg_data["quiz"] = quiz
 
-    found: set[str] = set()
+    found: dict[str, str] = {}
     for line in _iter_log_lines(log_folder):
         if _QUIZ_LINE_MARK not in line:
             continue
@@ -555,32 +553,24 @@ def collect_pending_questions(log_folder: Path, known_questions: set[str],
         low_text = text.lower()
         if any(m in low_text for m in _MATH_SKIP):
             continue
-        # Уже есть в локальном quiz (в т.ч. с пустым ответом) или в
-        # известных источниках (remote_quiz) — пропускаем.
-        if text in quiz:
+        if text in quiz or text in found:
             continue
         if any(k.lower() in low_text or low_text in k.lower()
                for k in known_questions):
             continue
-        found.add(text)
+        found[text] = ""
 
     if not found:
         return 0
 
-    for q in sorted(found):
-        quiz[q] = ""
-
-    config_path.write_text(
-        json.dumps(cfg_data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    return len(found)
+    return _merge_quiz_into_config(found, config_path)
 
 
 def _merge_quiz_into_config(source: dict[str, str], config_path: Path) -> int:
     """Мержит вопросы из source в responses.json → quiz.
     Новые вопросы добавляются; пустые ответы заменяются непустыми.
-    Возвращает количество добавленных/обновлённых записей."""
+    Результат сортируется: сначала с ответами, потом без, внутри по алфавиту.
+    Дубли удаляются. Возвращает количество добавленных/обновлённых записей."""
     try:
         cfg_data = json.loads(config_path.read_text(encoding="utf-8"))
     except Exception:
@@ -591,7 +581,6 @@ def _merge_quiz_into_config(source: dict[str, str], config_path: Path) -> int:
     quiz = cfg_data.get("quiz")
     if not isinstance(quiz, dict):
         quiz = {}
-        cfg_data["quiz"] = quiz
 
     changed = 0
     for q, a in source.items():
@@ -604,11 +593,16 @@ def _merge_quiz_into_config(source: dict[str, str], config_path: Path) -> int:
             quiz[q] = a_str
             changed += 1
 
-    if changed:
-        config_path.write_text(
-            json.dumps(cfg_data, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+    # Сортировка: сначала вопросы с ответами, потом без; внутри по алфавиту.
+    cfg_data["quiz"] = dict(sorted(
+        quiz.items(),
+        key=lambda kv: (not kv[1].strip(), kv[0].lower()),
+    ))
+
+    config_path.write_text(
+        json.dumps(cfg_data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     return changed
 
 
