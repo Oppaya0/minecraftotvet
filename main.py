@@ -450,7 +450,7 @@ class Typist:
         self.kb = Controller()
         self.settings = settings
 
-    def send_chat(self, message: str) -> None:
+    def _open_chat_and_paste(self, message: str) -> None:
         s = self.settings
         key = _chat_key(s.chat_key)
         self.kb.press(key)
@@ -458,10 +458,6 @@ class Typist:
         time.sleep(0.25)
 
         if _copy_to_clipboard(message):
-            # Вставка через Ctrl+V — работает на любой раскладке.
-            # VK_V (0x56) используем через VK-код, чтобы Ctrl+V
-            # сработал независимо от раскладки (иначе на русской
-            # Ctrl+'v' = Ctrl+'м' и вставка не работает).
             v_key = KeyCode.from_vk(0x56)
             self.kb.press(Key.ctrl_l)
             self.kb.press(v_key)
@@ -476,6 +472,21 @@ class Typist:
         time.sleep(0.05)
         self.kb.press(Key.enter)
         self.kb.release(Key.enter)
+
+    def send_chat(self, message: str) -> None:
+        # Попытка 1: работает из обычного состояния.
+        self._open_chat_and_paste(message)
+        time.sleep(0.3)
+        # Esc: закроет инвентарь (если открыт) или откроет паузу (если нет).
+        self.kb.press(Key.esc)
+        self.kb.release(Key.esc)
+        time.sleep(0.2)
+        # Попытка 2: работает если был инвентарь (теперь закрыт).
+        self._open_chat_and_paste(message)
+        time.sleep(0.2)
+        # Финальный Esc: закроет паузу, если она была открыта из попытки 1.
+        self.kb.press(Key.esc)
+        self.kb.release(Key.esc)
 
 
 # --- Сбор вопросов викторины из архивных логов -----------------------------
