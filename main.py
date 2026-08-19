@@ -506,18 +506,29 @@ def fetch_remote_quiz(url: str, dest: Path) -> bool:
         return False
 
 
+def sync_remote_quiz(cfg: Config) -> bool:
+    """Разово, синхронно, скачивает удалённую викторину. Возвращает True,
+    если файл обновлён (и, значит, конфиг стоит перечитать)."""
+    url = cfg.settings.remote_quiz_url.strip()
+    if not url:
+        return False
+    dest = cfg.path.with_name("remote_quiz.json")
+    return fetch_remote_quiz(url, dest)
+
+
 def start_remote_updater(cfg: Config) -> None:
-    """Запускает фоновый поток: сразу скачивает remote_quiz.json и
-    затем повторяет по интервалу из настроек."""
+    """Запускает фоновый поток обновления удалённой викторины по интервалу
+    из настроек. Первое (стартовое) скачивание делается синхронно через
+    sync_remote_quiz — этот поток спит сначала interval, потом качает."""
     dest = cfg.path.with_name("remote_quiz.json")
 
     def loop():
         while True:
-            url = cfg.settings.remote_quiz_url.strip()
             interval_min = max(1, int(cfg.settings.remote_quiz_interval_min))
+            time.sleep(interval_min * 60)
+            url = cfg.settings.remote_quiz_url.strip()
             if url:
                 fetch_remote_quiz(url, dest)
-            time.sleep(interval_min * 60)
 
     if cfg.settings.remote_quiz_url.strip():
         t = threading.Thread(target=loop, name="remote-quiz-updater", daemon=True)
@@ -553,6 +564,16 @@ def main() -> None:
     log_path = Path(cfg.settings.log_path)
     print(f"[log] Слежу за файлом: {log_path}")
     print(f"[config] Слежу за конфигом: {CONFIG_PATH}")
+
+    # Синхронно скачиваем свежий remote_quiz.json ДО сбора pending — иначе
+    # сборщик считает "неизвестными" те вопросы, ответы на которые уже
+    # есть в общей базе, и добавляет их в pending_quiz.json зря.
+    try:
+        if sync_remote_quiz(cfg):
+            cfg.load()
+    except Exception as e:
+        print(f"[remote] Первичное обновление не удалось: {e}", file=sys.stderr)
+
     start_remote_updater(cfg)
 
     # Разово при старте: собрать все вопросы викторины из старых архивных
