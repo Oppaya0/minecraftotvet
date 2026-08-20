@@ -10,6 +10,10 @@ responses.json и отправляет ответ в игровой чат че�
   варианты можно добавлять на лету, без перезапуска программы.
 - Игнорирование собственных сообщений (по нику) — чтобы бот не отвечал сам себе.
 - Поддержка трёх режимов сопоставления: contains, exact, regex.
+- Проигрывание звука при срабатывании конкретного правила/вопроса (поле
+  "sound" в responses.json). Работает и в обычном .py, и в скомпилированной
+  PyInstaller-версии — путь к .wav ищется рядом с exe/скриптом, если указан
+  не абсолютный путь.
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ import sys
 import threading
 import time
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +37,15 @@ try:
 except ImportError:
     print("Требуется библиотека pynput. Установите: pip install pynput", file=sys.stderr)
     raise
+
+# winsound — часть стандартной библиотеки Python на Windows. PyInstaller
+# подхватывает его автоматически при сборке, отдельно ставить/указывать
+# ничего не нужно. На не-Windows модуль просто отсутствует — там звук
+# проигрываться не будет (play_sound тихо выйдет).
+try:
+    import winsound
+except ImportError:
+    winsound = None
 
 
 def _chat_key(ch: str):
@@ -46,7 +59,7 @@ def _chat_key(ch: str):
         if "a" <= ch <= "z":
             return KeyCode.from_vk(ord(ch.upper()))  # VK_A..VK_Z
         if "0" <= ch <= "9":
-            return KeyCode.from_vk(ord(ch))          # VK_0..VK_9
+            return KeyCode.from_vk(ord(ch))  # VK_0..VK_9
     return ch
 
 
@@ -67,6 +80,7 @@ CHAT_PATTERNS = [
     # [CHAT] Ник: текст
     re.compile(r"\]:\s*\[CHAT\]\s*(?P<nick>[^:>\s]+)\s*[:>]\s*(?P<text>.+)$"),
 ]
+
 # Fallback: любое сообщение в клиентском чате (Render thread/Chat/INFO).
 # Используется в том числе для системных сообщений от плагинов (например,
 # "[Викторина] Какой плагин добавляет регионы?"). Ник в этом случае — "".
@@ -76,7 +90,6 @@ SYSTEM_CHAT_PATTERN = re.compile(
 
 # Minecraft §-коды форматирования (§a, §l, §r и т.д.) — убираем из текста.
 _MC_COLOR_CODE = re.compile(r"§[0-9a-fk-or]", re.IGNORECASE)
-
 
 # --- Мини-калькулятор для вопросов "Сколько будет ..." ----------------------
 
@@ -92,7 +105,7 @@ _MATH_WORDS = [
     (r"\bделить(?:\s+на)?\b", "/"),
     (r"\bв\s+степени\b", "**"),
     ("×", "*"),
-    ("х", "*"),   # русская «х» между числами часто = умножение
+    ("х", "*"),  # русская «х» между числами часто = умножение
     ("·", "*"),
     ("÷", "/"),
     (":", "/"),
@@ -145,10 +158,11 @@ def try_math_answer(text: str) -> str | None:
 @dataclass
 class Rule:
     triggers: list[str]
-    replies: list[str]
-    match: str = "contains"           # contains | exact | regex
+    replies: list[str] = field(default_factory=list)
+    match: str = "contains"  # contains | exact | regex
     case_sensitive: bool = False
-    cooldown: float = 0.0             # секунд между срабатываниями этого правила
+    cooldown: float = 0.0  # секунд между срабатываниями этого правила
+    sound: str = ""  # путь к .wav, проигрывается при срабатывании правила
     _last_fired: float = 0.0
 
     def matches(self, text: str) -> bool:
@@ -167,7 +181,11 @@ class Rule:
                     return True
         return False
 
-    def pick_reply(self) -> str:
+    def pick_reply(self) -> str | None:
+        """Возвращает случайный ответ, либо None, если у правила есть
+        только звук без текстовых ответов (правило "тихого" алерта)."""
+        if not self.replies:
+            return None
         return random.choice(self.replies)
 
 
@@ -176,13 +194,13 @@ class Settings:
     min_delay: float = 2.0
     max_delay: float = 4.0
     log_path: str = ""
-    chat_key: str = "t"                # клавиша открытия чата
-    ignore_own_username: str = ""      # ваш ник, чтобы не отвечать себе
-    type_interval: float = 0.02        # пауза между нажатиями клавиш (реалистичный ввод)
-    block_user_input: bool = True      # блокировать клавиатуру/мышь пользователя во время печати бота
-    auto_focus: bool = True            # автоматически переключаться на окно Minecraft перед ответом
-    remote_quiz_url: str = ""          # URL общей викторины (JSON вида {"вопрос": "ответ"})
-    remote_quiz_interval_min: int = 60 # как часто скачивать обновления, в минутах
+    chat_key: str = "t"  # клавиша открытия чата
+    ignore_own_username: str = ""  # ваш ник, чтобы не отвечать себе
+    type_interval: float = 0.02  # пауза между нажатиями клавиш (реалистичный ввод)
+    block_user_input: bool = True  # блокировать клавиатуру/мышь пользователя во время печати бота
+    auto_focus: bool = True  # автоматически переключаться на окно Minecraft перед ответом
+    remote_quiz_url: str = ""  # URL общей викторины (JSON вида {"вопрос": "ответ"})
+    remote_quiz_interval_min: int = 60  # как часто скачивать обновления, в минутах
 
 
 class Config:
@@ -191,6 +209,7 @@ class Config:
         self.mtime: float = 0.0
         self.settings = Settings()
         self.rules: list[Rule] = []
+        self._saving = False
         self.load()
 
     def load(self) -> None:
@@ -208,36 +227,53 @@ class Config:
             remote_quiz_url=str(s.get("remote_quiz_url", "")),
             remote_quiz_interval_min=int(s.get("remote_quiz_interval_min", 60)),
         )
+
         rules: list[Rule] = []
         for entry in raw.get("responses", []):
             rules.append(Rule(
                 triggers=list(entry["triggers"]),
-                replies=list(entry["replies"]),
+                replies=list(entry.get("replies", [])),
                 match=str(entry.get("match", "contains")),
                 case_sensitive=bool(entry.get("case_sensitive", False)),
                 cooldown=float(entry.get("cooldown", 0.0)),
+                sound=str(entry.get("sound", "")).strip(),
             ))
 
         # Упрощённая секция "quiz": словарь "вопрос-подстрока" -> "ответ".
         # Каждая пара превращается в отдельное правило contains/без регистра.
-        # Ответ может быть строкой или списком строк (тогда выбирается случайный).
+        # Ответ может быть:
+        #   - строкой                              -> один вариант ответа
+        #   - списком строк                        -> случайный вариант ответа
+        #   - объектом {"answer": ..., "sound": ..} -> ответ (строка/список)
+        #     плюс путь к звуку, который проигрывается при совпадении.
+        #     Поле "answer" можно не указывать — тогда правило будет играть
+        #     только звук, без отправки сообщения в чат.
         def _add_quiz(mapping: dict) -> int:
             n = 0
             for question, answer in mapping.items():
-                # Пропускаем записи с пустым ответом (например, из pending_quiz.json,
-                # где вопросы ждут заполнения пользователем).
-                if isinstance(answer, list):
-                    replies = [str(r) for r in answer if str(r).strip()]
+                sound = ""
+                value = answer
+                if isinstance(value, dict):
+                    sound = str(value.get("sound", "")).strip()
+                    value = value.get("answer", "")
+
+                if isinstance(value, list):
+                    replies = [str(r) for r in value if str(r).strip()]
                 else:
-                    replies = [str(answer)] if str(answer).strip() else []
-                if not replies:
+                    replies = [str(value)] if str(value).strip() else []
+
+                # Пропускаем записи без ответа и без звука (например, из
+                # pending_quiz.json, где вопросы ждут заполнения пользователем).
+                if not replies and not sound:
                     continue
+
                 rules.append(Rule(
                     triggers=[str(question)],
                     replies=replies,
                     match="contains",
                     case_sensitive=False,
                     cooldown=0.0,
+                    sound=sound,
                 ))
                 n += 1
             return n
@@ -248,10 +284,16 @@ class Config:
         n_quiz = _add_quiz(quiz)
 
         # Пересортировка quiz: с ответами первыми, без — в конце.
+        def _quiz_is_empty(v: Any) -> bool:
+            if isinstance(v, str):
+                return not v.strip()
+            if isinstance(v, dict):
+                return not str(v.get("answer", "")).strip()
+            return True
+
         sorted_quiz = dict(sorted(
             quiz.items(),
-            key=lambda kv: (not kv[1].strip() if isinstance(kv[1], str) else True,
-                            kv[0].lower()),
+            key=lambda kv: (_quiz_is_empty(kv[1]), kv[0].lower()),
         ))
         if list(sorted_quiz.keys()) != list(quiz.keys()):
             raw["quiz"] = sorted_quiz
@@ -265,7 +307,6 @@ class Config:
         # Более специфичные (длинные) триггеры проверяются раньше — иначе
         # общий триггер вроде "Викторина" мог бы перебить конкретный вопрос.
         rules.sort(key=lambda r: -max((len(t) for t in r.triggers), default=0))
-
         self.rules = rules
         self.mtime = self.path.stat().st_mtime
         print(f"[config] Загружено правил: {len(self.rules)} (quiz: {n_quiz})")
@@ -298,11 +339,13 @@ def follow(path: Path):
         if line:
             yield line.rstrip("\n")
             continue
+
         time.sleep(0.25)
         try:
             st = path.stat()
         except FileNotFoundError:
             continue
+
         new_inode = st.st_ino if hasattr(st, "st_ino") else None
         if new_inode is not None and inode is not None and new_inode != inode:
             print("[log] Обнаружена ротация файла, переоткрываю.")
@@ -313,6 +356,7 @@ def follow(path: Path):
             f = path.open("r", encoding="utf-8", errors="replace")
             inode = new_inode
             continue
+
         if st.st_size < f.tell():
             print("[log] Файл усечён, переоткрываю.")
             try:
@@ -333,6 +377,7 @@ def parse_chat(line: str) -> tuple[str, str] | None:
         m = pat.search(line)
         if m:
             return m.group("nick"), _strip_mc_codes(m.group("text")).strip()
+
     m = SYSTEM_CHAT_PATTERN.search(line)
     if m:
         text = _strip_mc_codes(m.group("text")).strip()
@@ -343,6 +388,7 @@ def parse_chat(line: str) -> tuple[str, str] | None:
         if any(k in low for k in noisy):
             return None
         return "", text
+
     return None
 
 
@@ -479,9 +525,11 @@ class Typist:
 
 # Строка чата, содержащая вопрос викторины.
 _QUIZ_LINE_MARK = "[Викторина]"
+
 # Служебные строки, которые не являются вопросами.
 _QUIZ_SKIP_SUBSTR = ("победил", "правильный ответ", "викторина окончена",
                      "начинается", "начинаем", "закончилась")
+
 # Математические вопросы решает встроенный калькулятор, вручную не нужны.
 _MATH_SKIP = ("сколько будет", "чему равно", "посчитай")
 
@@ -505,7 +553,7 @@ def _iter_log_lines(folder: Path):
 
 
 def collect_pending_questions(log_folder: Path, known_questions: set[str],
-                              config_path: Path) -> int:
+                               config_path: Path) -> int:
     """Проходит по старым логам, вытаскивает уникальные вопросы викторины,
     добавляет их в responses.json → quiz с пустым ответом.
     Возвращает количество новых записей."""
@@ -531,11 +579,13 @@ def collect_pending_questions(log_folder: Path, known_questions: set[str],
         low = line.lower()
         if any(s in low for s in _QUIZ_SKIP_SUBSTR):
             continue
+
         i = line.find(_QUIZ_LINE_MARK)
         text = line[i + len(_QUIZ_LINE_MARK):].strip()
         text = text.rstrip("\r\n\t ")
         if not text:
             continue
+
         low_text = text.lower()
         if any(m in low_text for m in _MATH_SKIP):
             continue
@@ -544,11 +594,11 @@ def collect_pending_questions(log_folder: Path, known_questions: set[str],
         if any(k.lower() in low_text or low_text in k.lower()
                for k in known_questions):
             continue
+
         found[text] = ""
 
     if not found:
         return 0
-
     return _merge_quiz_into_config(found, config_path)
 
 
@@ -575,16 +625,22 @@ def _merge_quiz_into_config(source: dict[str, str], config_path: Path) -> int:
         if q not in quiz:
             quiz[q] = a_str
             changed += 1
-        elif not quiz[q] and a_str:
+        elif isinstance(quiz[q], str) and not quiz[q] and a_str:
             quiz[q] = a_str
             changed += 1
 
     # Сортировка: сначала вопросы с ответами, потом без; внутри по алфавиту.
+    def _is_empty(v: Any) -> bool:
+        if isinstance(v, str):
+            return not v.strip()
+        if isinstance(v, dict):
+            return not str(v.get("answer", "")).strip()
+        return True
+
     cfg_data["quiz"] = dict(sorted(
         quiz.items(),
-        key=lambda kv: (not kv[1].strip(), kv[0].lower()),
+        key=lambda kv: (_is_empty(kv[1]), kv[0].lower()),
     ))
-
     config_path.write_text(
         json.dumps(cfg_data, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -601,15 +657,19 @@ def fetch_remote_quiz(url: str, dest: Path, config_path: Path | None = None) -> 
         req = urllib.request.Request(url, headers={"User-Agent": "minecraftotvet/1.0"})
         with urllib.request.urlopen(req, timeout=15) as r:
             data = r.read().decode("utf-8")
+
         parsed = json.loads(data)
         if not isinstance(parsed, dict):
             print(f"[remote] {url}: ожидался JSON-объект, пропускаю.", file=sys.stderr)
             return False
+
         old = dest.read_text(encoding="utf-8") if dest.exists() else ""
         if old.strip() == data.strip():
             return False
+
         dest.write_text(data, encoding="utf-8")
         print(f"[remote] Обновлено {len(parsed)} записей викторины: {dest.name}")
+
         if config_path:
             merged = _merge_quiz_into_config(parsed, config_path)
             if merged:
@@ -659,10 +719,29 @@ def maybe_block(settings: Settings) -> bool:
         return False
     blocked = _block_user_input(True)
     if not blocked and not _BLOCK_WARNED and os.name == "nt":
-        print("[bot]  Блокировка ввода не сработала — запусти скрипт от "
+        print("[bot] Блокировка ввода не сработала — запусти скрипт от "
               "имени администратора, чтобы включить её.", file=sys.stderr)
         _BLOCK_WARNED = True
     return blocked
+
+
+def play_sound(path: str) -> None:
+    """Проигрывает .wav-файл асинхронно (не блокирует поток бота).
+
+    Относительные пути ищутся рядом с responses.json — то есть рядом со
+    скриптом в обычном режиме и рядом с .exe в скомпилированной
+    (PyInstaller) версии, так же, как уже работает сам responses.json.
+    Работает только на Windows (winsound); на других ОС — тихо ничего
+    не делает."""
+    if not path:
+        return
+    if winsound is None or os.name != "nt":
+        return
+    full = path if os.path.isabs(path) else str(CONFIG_PATH.parent / path)
+    try:
+        winsound.PlaySound(full, winsound.SND_FILENAME | winsound.SND_ASYNC)
+    except Exception as e:
+        print(f"[sound] Ошибка воспроизведения {full}: {e}", file=sys.stderr)
 
 
 def main() -> None:
@@ -671,6 +750,7 @@ def main() -> None:
         sys.exit(1)
 
     cfg = Config(CONFIG_PATH)
+
     if not cfg.settings.log_path:
         print("В settings.log_path не указан путь к latest.log", file=sys.stderr)
         sys.exit(1)
@@ -703,6 +783,7 @@ def main() -> None:
             cfg.load()  # подтянуть свежий responses.json
     except Exception as e:
         print(f"[collect] Ошибка сбора вопросов: {e}", file=sys.stderr)
+
     if cfg.settings.auto_focus:
         print("Готов к работе. Окно Minecraft будет активировано автоматически "
               "перед ответом — можно работать в другом окне.\n")
@@ -728,7 +809,7 @@ def main() -> None:
         nick, text = parsed
 
         if cfg.settings.ignore_own_username and \
-           nick.lower() == cfg.settings.ignore_own_username.lower():
+                nick.lower() == cfg.settings.ignore_own_username.lower():
             continue
 
         key = (nick, text.strip().lower())
@@ -749,7 +830,7 @@ def main() -> None:
                     _focus_minecraft()
                 typist.send_chat(math_reply)
             except Exception as e:
-                print(f"[bot]  ошибка отправки: {e}", file=sys.stderr)
+                print(f"[bot] ошибка отправки: {e}", file=sys.stderr)
             finally:
                 if blocked:
                     _block_user_input(False)
@@ -762,22 +843,35 @@ def main() -> None:
                 continue
             if rule.matches(text):
                 reply = rule.pick_reply()
-                # random.uniform даёт float с полноценными миллисекундами,
-                # так что задержка распределена по всему диапазону.
-                delay = random.uniform(cfg.settings.min_delay, cfg.settings.max_delay)
                 print(f"[chat] <{nick}> {text}")
-                print(f"[bot]  -> через {delay:.3f}с: {reply}")
-                blocked = maybe_block(cfg.settings)
-                try:
-                    time.sleep(delay)
-                    if cfg.settings.auto_focus:
-                        _focus_minecraft()
-                    typist.send_chat(reply)
-                except Exception as e:
-                    print(f"[bot]  ошибка отправки: {e}", file=sys.stderr)
-                finally:
-                    if blocked:
-                        _block_user_input(False)
+
+                # Звук проигрывается сразу, не дожидаясь задержки перед
+                # ответом — это сигнал "сработал триггер", а не часть
+                # самого ответа в чат.
+                if rule.sound:
+                    print(f"[sound] -> {rule.sound}")
+                    play_sound(rule.sound)
+
+                if reply is not None:
+                    # random.uniform даёт float с полноценными миллисекундами,
+                    # так что задержка распределена по всему диапазону.
+                    delay = random.uniform(cfg.settings.min_delay, cfg.settings.max_delay)
+                    print(f"[bot] -> через {delay:.3f}с: {reply}")
+                    blocked = maybe_block(cfg.settings)
+                    try:
+                        time.sleep(delay)
+                        if cfg.settings.auto_focus:
+                            _focus_minecraft()
+                        typist.send_chat(reply)
+                    except Exception as e:
+                        print(f"[bot] ошибка отправки: {e}", file=sys.stderr)
+                    finally:
+                        if blocked:
+                            _block_user_input(False)
+                else:
+                    # Правило "тихого" алерта: только звук, без текста в чат.
+                    print("[bot] правило без текстового ответа — только звук.")
+
                 rule._last_fired = time.time()
                 last_answered_key = key
                 break  # одно правило на сообщение
