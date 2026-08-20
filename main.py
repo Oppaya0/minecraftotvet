@@ -202,6 +202,7 @@ class Settings:
     auto_focus: bool = True  # автоматически переключаться на окно Minecraft перед ответом
     remote_quiz_url: str = ""  # URL общей викторины (JSON вида {"вопрос": "ответ"})
     remote_quiz_interval_min: int = 60  # как часто скачивать обновления, в минутах
+    dedup_window_seconds: float = 300.0  # не отвечать повторно на то же сообщение раньше, чем через N секунд
 
 
 class Config:
@@ -227,6 +228,7 @@ class Config:
             auto_focus=bool(s.get("auto_focus", True)),
             remote_quiz_url=str(s.get("remote_quiz_url", "")),
             remote_quiz_interval_min=int(s.get("remote_quiz_interval_min", 60)),
+            dedup_window_seconds=float(s.get("dedup_window_seconds", 300.0)),
         )
 
         rules: list[Rule] = []
@@ -796,11 +798,11 @@ def main() -> None:
 
     typist = Typist(cfg.settings)
 
-    # Последнее сообщение, на которое мы ответили. Нужно, чтобы не отвечать
-    # дважды на одну и ту же строку, если она повторится подряд (например,
-    # бот-викторина повторил вопрос через таймер). Как только придёт любое
-    # другое сообщение, а затем этот же вопрос снова — ответ будет отправлен.
-    last_answered_key: tuple[str, str] | None = None
+    # Время последнего ответа на каждое уникальное сообщение (ник + текст).
+    # Пока не прошло settings.dedup_window_seconds — повторный ответ на то же
+    # самое сообщение не отправляется (анти-спам). Правило с ignore_dedup=True
+    # полностью пропускает эту проверку.
+    last_answered_at: dict[tuple[str, str], float] = {}
 
     for line in follow(log_path):
         cfg.maybe_reload()
@@ -816,11 +818,19 @@ def main() -> None:
             continue
 
         key = (nick, text.strip().lower())
-      
+        now = time.time()
+
+        def _is_dup(ignore_dedup: bool) -> bool:
+            if ignore_dedup:
+                return False
+            last = last_answered_at.get(key)
+            return last is not None and (now - last) < cfg.settings.dedup_window_seconds
 
         # Сначала пробуем встроенный калькулятор ("Сколько будет 2+2?").
         math_reply = try_math_answer(text)
         if math_reply is not None:
+            if _is_dup(ignore_dedup=False):
+                continue
             delay = random.uniform(cfg.settings.min_delay, cfg.settings.max_delay)
             print(f"[chat] <{nick}> {text}")
             print(f"[math] -> через {delay:.3f}с: {math_reply}")
@@ -835,49 +845,51 @@ def main() -> None:
             finally:
                 if blocked:
                     _block_user_input(False)
-            last_answered_key = key
+            last_answered_at[key] = time.time()
             continue
 
-        now = time.time()
         for rule in cfg.rules:
             if rule.cooldown and (now - rule._last_fired) < rule.cooldown:
                 continue
-            if rule.matches(text):
-    if key == last_answered_key and not rule.ignore_dedup:
-        break  # это дубликат, и правило не разрешает игнорировать лок
-    reply = rule.pick_reply()
-    ...
+            if not rule.matches(text):
+                continue
+            if _is_dup(rule.ignore_dedup):
+                break  # это дубликат в пределах окна, и правило не разрешает его игнорировать
 
-                # Звук проигрывается сразу, не дожидаясь задержки перед
-                # ответом — это сигнал "сработал триггер", а не часть
-                # самого ответа в чат.
-                if rule.sound:
-                    print(f"[sound] -> {rule.sound}")
-                    play_sound(rule.sound)
+            reply = rule.pick_reply()
 
-                if reply is not None:
-                    # random.uniform даёт float с полноценными миллисекундами,
-                    # так что задержка распределена по всему диапазону.
-                    delay = random.uniform(cfg.settings.min_delay, cfg.settings.max_delay)
-                    print(f"[bot] -> через {delay:.3f}с: {reply}")
-                    blocked = maybe_block(cfg.settings)
-                    try:
-                        time.sleep(delay)
-                        if cfg.settings.auto_focus:
-                            _focus_minecraft()
-                        typist.send_chat(reply)
-                    except Exception as e:
-                        print(f"[bot] ошибка отправки: {e}", file=sys.stderr)
-                    finally:
-                        if blocked:
-                            _block_user_input(False)
-                else:
-                    # Правило "тихого" алерта: только звук, без текста в чат.
-                    print("[bot] правило без текстового ответа — только звук.")
+            # Звук проигрывается сразу, не дожидаясь задержки перед
+            # ответом — это сигнал "сработал триггер", а не часть
+            # самого ответа в чат.
+            if rule.sound:
+                print(f"[sound] -> {rule.sound}")
+                play_sound(rule.sound)
 
-                rule._last_fired = time.time()
-                last_answered_key = key
-                break  # одно правило на сообщение
+            if reply is not None:
+                # random.uniform даёт float с полноценными миллисекундами,
+                # так что задержка распределена по всему диапазону.
+                delay = random.uniform(cfg.settings.min_delay, cfg.settings.max_delay)
+                print(f"[chat] <{nick}> {text}")
+                print(f"[bot] -> через {delay:.3f}с: {reply}")
+                blocked = maybe_block(cfg.settings)
+                try:
+                    time.sleep(delay)
+                    if cfg.settings.auto_focus:
+                        _focus_minecraft()
+                    typist.send_chat(reply)
+                except Exception as e:
+                    print(f"[bot] ошибка отправки: {e}", file=sys.stderr)
+                finally:
+                    if blocked:
+                        _block_user_input(False)
+            else:
+                # Правило "тихого" алерта: только звук, без текста в чат.
+                print(f"[chat] <{nick}> {text}")
+                print("[bot] правило без текстового ответа — только звук.")
+
+            rule._last_fired = time.time()
+            last_answered_at[key] = time.time()
+            break  # одно правило на сообщение
 
 
 if __name__ == "__main__":
