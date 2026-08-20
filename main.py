@@ -293,7 +293,8 @@ class Config:
 
         sorted_quiz = dict(sorted(
             quiz.items(),
-            key=lambda kv: (_quiz_is_empty(kv[1]), kv[0].lower()),
+            key=lambda kv: (not kv[1].strip() if isinstance(kv[1], str) else True,
+                            kv[0].lower()),
         ))
         if list(sorted_quiz.keys()) != list(quiz.keys()):
             raw["quiz"] = sorted_quiz
