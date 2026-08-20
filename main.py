@@ -162,6 +162,7 @@ class Rule:
     match: str = "contains"  # contains | exact | regex
     case_sensitive: bool = False
     cooldown: float = 0.0  # секунд между срабатываниями этого правила
+    ignore_dedup: bool = False
     sound: str = ""  # путь к .wav, проигрывается при срабатывании правила
     _last_fired: float = 0.0
 
@@ -236,6 +237,7 @@ class Config:
                 match=str(entry.get("match", "contains")),
                 case_sensitive=bool(entry.get("case_sensitive", False)),
                 cooldown=float(entry.get("cooldown", 0.0)),
+                ignore_dedup=bool(entry.get("ignore_dedup", False)),
                 sound=str(entry.get("sound", "")).strip(),
             ))
 
@@ -814,9 +816,7 @@ def main() -> None:
             continue
 
         key = (nick, text.strip().lower())
-        if key == last_answered_key:
-            # Дубликат последней обработанной строки — пропускаем.
-            continue
+      
 
         # Сначала пробуем встроенный калькулятор ("Сколько будет 2+2?").
         math_reply = try_math_answer(text)
@@ -843,8 +843,10 @@ def main() -> None:
             if rule.cooldown and (now - rule._last_fired) < rule.cooldown:
                 continue
             if rule.matches(text):
-                reply = rule.pick_reply()
-                print(f"[chat] <{nick}> {text}")
+    if key == last_answered_key and not rule.ignore_dedup:
+        break  # это дубликат, и правило не разрешает игнорировать лок
+    reply = rule.pick_reply()
+    ...
 
                 # Звук проигрывается сразу, не дожидаясь задержки перед
                 # ответом — это сигнал "сработал триггер", а не часть
