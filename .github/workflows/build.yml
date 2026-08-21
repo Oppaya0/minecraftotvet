@@ -7,10 +7,8 @@ on:
     paths:
       - "main.py"
       - "requirements.txt"
-      - "build.bat"
       - "responses.json"
       - "quiz_shared.json"
-      - "запустить.bat"
       - "*.wav"
       - ".github/workflows/build.yml"
 
@@ -45,23 +43,33 @@ jobs:
         run: |
           python -m PyInstaller --noconfirm --onefile --console --name minecraftotvet --uac-admin main.py
 
+      - name: Check executable
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist\minecraftotvet.exe")) {
+            Write-Error "minecraftotvet.exe was not created"
+            exit 1
+          }
+
+          Write-Host "Build successful:"
+          Get-Item "dist\minecraftotvet.exe"
+
       - name: Pack compiled archive
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release-compiled | Out-Null
 
-          Copy-Item dist\minecraftotvet.exe release-compiled\
+          Copy-Item "dist\minecraftotvet.exe" "release-compiled\"
+          Copy-Item "responses.json" "release-compiled\"
+          Copy-Item "quiz_shared.json" "release-compiled\"
 
-          Copy-Item responses.json release-compiled\
-          Copy-Item quiz_shared.json release-compiled\
-
-          if (Test-Path *.wav) {
-            Copy-Item *.wav release-compiled\
+          if (Test-Path "*.wav") {
+            Copy-Item "*.wav" "release-compiled\"
           }
 
           Compress-Archive `
-            -Path release-compiled\* `
-            -DestinationPath minecraftotvet-compiled.zip `
+            -Path "release-compiled\*" `
+            -DestinationPath "minecraftotvet-compiled.zip" `
             -Force
 
       - name: Pack source archive
@@ -69,20 +77,18 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path release-source | Out-Null
 
-          Copy-Item main.py release-source\
-          Copy-Item requirements.txt release-source\
-          Copy-Item responses.json release-source\
-          Copy-Item quiz_shared.json release-source\
-          Copy-Item build.bat release-source\
-          Copy-Item "запустить.bat" release-source\
+          Copy-Item "main.py" "release-source\"
+          Copy-Item "requirements.txt" "release-source\"
+          Copy-Item "responses.json" "release-source\"
+          Copy-Item "quiz_shared.json" "release-source\"
 
-          if (Test-Path *.wav) {
-            Copy-Item *.wav release-source\
+          if (Test-Path "*.wav") {
+            Copy-Item "*.wav" "release-source\"
           }
 
           Compress-Archive `
-            -Path release-source\* `
-            -DestinationPath minecraftotvet-source.zip `
+            -Path "release-source\*" `
+            -DestinationPath "minecraftotvet-source.zip" `
             -Force
 
       - name: Upload build artifacts
@@ -100,23 +106,22 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: "Последняя сборка"
           body: |
-            Автосборка ветки `claude/minecraft-auto-responder-czeo7q`.
+            Автосборка Minecraft Auto Responder.
 
-            **minecraftotvet-compiled.zip**
-            - minecraftotvet.exe — готовый автоответчик
-            - responses.json — база вопросов и ответов
-            - quiz_shared.json — общая база викторины
+            minecraftotvet-compiled.zip:
+            - minecraftotvet.exe
+            - responses.json
+            - quiz_shared.json
             - звуковые файлы, если они есть
 
-            **minecraftotvet-source.zip**
+            minecraftotvet-source.zip:
             - main.py
             - requirements.txt
             - responses.json
             - quiz_shared.json
-            - build.bat
-            - запустить.bat
+            - звуковые файлы, если они есть
 
-            Автоматический merge вопросов и ответов выполняется самим `main.py`.
+            Автоматический merge вопросов и ответов выполняется самим main.py.
           files: |
             minecraftotvet-compiled.zip
             minecraftotvet-source.zip
