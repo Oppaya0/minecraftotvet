@@ -555,306 +555,217 @@ def _iter_log_lines(folder: Path):
                         yield line
         except Exception as e:
             print(f"[collect] Ошибка чтения {p.name}: {e}", file=sys.stderr)
-def _normalize_quiz_question(text: str) -> str:
-    """Нормализует вопрос для поиска одинаковых вопросов."""
-    text = _strip_mc_codes(str(text))
-    text = text.replace("\u00a0", " ")
-    text = text.replace("Ё", "Е").replace("ё", "е")
-    text = text.strip().lower()
-    text = re.sub(r"\s+", " ", text)
-    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
-    return text
 
 
-def _get_quiz_answer(value: Any) -> Any:
-    """Возвращает answer из строки, списка или объекта quiz."""
-    if isinstance(value, dict):
-        return value.get("answer", "")
-    return value
-
-
-def _quiz_answer_empty(value: Any) -> bool:
-    """True, если у записи нет непустого ответа."""
-    answer = _get_quiz_answer(value)
-
-    if isinstance(answer, list):
-        return not any(str(x).strip() for x in answer)
-
-    return not str(answer).strip()
-
-def _extract_quiz_answer(value: Any) -> Any:
-    """Достаёт answer из любого поддерживаемого формата quiz."""
-    if isinstance(value, dict):
-        return value.get("answer", "")
-    return value
-
-
-def _answer_is_empty(value: Any) -> bool:
-    """Проверяет, есть ли реально ответ."""
-    answer = _extract_quiz_answer(value)
-
-    if isinstance(answer, list):
-        return not any(str(x).strip() for x in answer)
-
-    return not str(answer).strip()
-
-
-def _merge_quiz_into_config(source: dict[str, Any], config_path: Path) -> int:
-    """Надёжно мержит вопросы/ответы из source в responses.json -> quiz.
-
-    Что делает:
-    - добавляет новые вопросы;
-    - находит существующие вопросы независимо от регистра, ё/е,
-      §-кодов и лишних пробелов;
-    - заполняет пустые ответы;
-    - поддерживает строку, список и объект {"answer": ..., "sound": ...};
-    - сохраняет существующий sound;
-    - не перезаписывает уже существующий непустой ответ;
-    - удаляет дубли вопросов;
-    - сохраняет результат обратно в responses.json.
-
-    Возвращает количество добавленных/обновлённых записей.
-    """
-    try:
-        cfg_data = json.loads(
-            config_path.read_text(encoding="utf-8")
-        )
-    except Exception as e:
-        print(
-            f"[merge] Не удалось прочитать {config_path.name}: {e}",
-            file=sys.stderr,
-        )
+def collect_pending_questions(log_folder: Path, known_questions: set[str],
+                               config_path: Path) -> int:
+    """Проходит по старым логам, вытаскивает уникальные вопросы викторины,
+    добавляет их в responses.json → quiz с пустым ответом.
+    Возвращает количество новых записей."""
+    if not config_path.exists():
         return 0
-
-    if not isinstance(cfg_data, dict):
-        print("[merge] responses.json должен содержать JSON-объект.",
+    try:
+        cfg_data = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"[collect] Не удалось прочитать {config_path.name}: {e}",
               file=sys.stderr)
+        return 0
+    if not isinstance(cfg_data, dict):
         return 0
 
     quiz = cfg_data.get("quiz", {})
     if not isinstance(quiz, dict):
         quiz = {}
 
+    found: dict[str, str] = {}
+    for line in _iter_log_lines(log_folder):
+        if _QUIZ_LINE_MARK not in line:
+            continue
+        low = line.lower()
+        if any(s in low for s in _QUIZ_SKIP_SUBSTR):
+            continue
+
+        i = line.find(_QUIZ_LINE_MARK)
+        text = line[i + len(_QUIZ_LINE_MARK):].strip()
+        text = text.rstrip("\r\n\t ")
+        if not text:
+            continue
+
+        low_text = text.lower()
+        if any(m in low_text for m in _MATH_SKIP):
+            continue
+        if text in quiz or text in found:
+            continue
+        if any(k.lower() in low_text or low_text in k.lower()
+               for k in known_questions):
+            continue
+
+        found[text] = ""
+
+    if not found:
+        return 0
+    return _merge_quiz_into_config(found, config_path)
+
+
+def _merge_quiz_into_config(source: dict[str, Any], config_path: Path) -> int:
+    """Мержит вопросы и ответы в responses.json -> quiz.
+
+    - Заполняет пустые ответы.
+    - Сохраняет sound и другие поля существующей записи.
+    - Не перезаписывает уже заполненный локальный ответ.
+    - Сопоставляет вопросы с учётом регистра, ё/е, Minecraft §-кодов
+      и лишних пробелов.
+    """
+    try:
+        cfg_data = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"[merge] Не удалось прочитать {config_path.name}: {e}", file=sys.stderr)
+        return 0
+
+    if not isinstance(cfg_data, dict):
+        print("[merge] responses.json должен содержать JSON-объект.", file=sys.stderr)
+        return 0
+
+    quiz = cfg_data.get("quiz", {})
+    if not isinstance(quiz, dict):
+        quiz = {}
+        cfg_data["quiz"] = quiz
+
+    def normalize_question(value: Any) -> str:
+        value = _strip_mc_codes(str(value))
+        value = value.replace("\u00a0", " ")
+        value = value.replace("Ё", "Е").replace("ё", "е")
+        value = re.sub(r"\s+", " ", value.strip().lower())
+        value = re.sub(r"\s+([,.;:!?])", r"\1", value)
+        return value
+
+    def get_answer(value: Any) -> Any:
+        if isinstance(value, dict):
+            return value.get("answer", "")
+        return value
+
+    def has_answer(value: Any) -> bool:
+        answer = get_answer(value)
+        if isinstance(answer, list):
+            return any(str(x).strip() for x in answer)
+        return bool(str(answer).strip())
+
+    # Индекс существующих вопросов. Это позволяет найти один и тот же
+    # вопрос, даже если Minecraft/общая база прислали немного другой текст.
+    question_index: dict[str, str] = {}
+    for existing_question in quiz:
+        normalized = normalize_question(existing_question)
+        if normalized and normalized not in question_index:
+            question_index[normalized] = existing_question
+
     changed = 0
 
-    # Индекс существующих вопросов по нормализованному тексту.
-    index: dict[str, str] = {}
-
-    for existing_question in quiz.keys():
-        normalized = _normalize_quiz_question(existing_question)
-
-        # Если дубль уже есть, оставляем первое вхождение.
-        if normalized and normalized not in index:
-            index[normalized] = existing_question
-
-    for question, incoming_value in source.items():
+    for question, incoming in source.items():
         question = str(question).strip()
-
         if not question:
             continue
 
-        normalized = _normalize_quiz_question(question)
-
+        normalized = normalize_question(question)
         if not normalized:
             continue
 
-        # -----------------------------
-        # Новый вопрос
-        # -----------------------------
-        if normalized not in index:
-            quiz[question] = incoming_value
-            index[normalized] = question
+        incoming_answer = get_answer(incoming)
+        incoming_has_answer = has_answer(incoming)
+        incoming_sound = ""
+        if isinstance(incoming, dict):
+            incoming_sound = str(incoming.get("sound", "")).strip()
+
+        # Новый вопрос. Даже если ответа пока нет, сохраняем его.
+        if normalized not in question_index:
+            if isinstance(incoming, dict):
+                quiz[question] = dict(incoming)
+            else:
+                quiz[question] = incoming_answer
+            question_index[normalized] = question
             changed += 1
             continue
 
-        # -----------------------------
-        # Вопрос уже существует
-        # -----------------------------
-        existing_question = index[normalized]
-        existing_value = quiz[existing_question]
+        existing_question = question_index[normalized]
+        current = quiz[existing_question]
 
-        incoming_answer = _extract_quiz_answer(incoming_value)
-
-        # Если из remote пришёл пустой ответ —
-        # ничего не меняем.
-        if _answer_is_empty(incoming_answer):
+        # Уже есть непустой ответ — не перезаписываем его.
+        if has_answer(current):
+            # Но sound можно дополнить, если его раньше не было.
+            if (incoming_sound and isinstance(current, dict)
+                    and not str(current.get("sound", "")).strip()):
+                current["sound"] = incoming_sound
+                changed += 1
             continue
 
-        # Если локальный ответ уже заполнен —
-        # НЕ перезаписываем его.
-        if not _answer_is_empty(existing_value):
+        if not incoming_has_answer:
             continue
 
-        # --------------------------------------------------
-        # Существующий объект:
-        # {"answer": "", "sound": "alert.wav"}
-        # --------------------------------------------------
-        if isinstance(existing_value, dict):
-            existing_value["answer"] = incoming_answer
+        # Существующая запись уже объектом: сохраняем все её поля.
+        if isinstance(current, dict):
+            before = json.dumps(current, ensure_ascii=False, sort_keys=True)
+            current["answer"] = incoming_answer
+            if incoming_sound and not str(current.get("sound", "")).strip():
+                current["sound"] = incoming_sound
+            after = json.dumps(current, ensure_ascii=False, sort_keys=True)
+            if before != after:
+                changed += 1
 
-            # Если в remote тоже есть sound и локального нет,
-            # можем добавить его.
-            if (
-                isinstance(incoming_value, dict)
-                and incoming_value.get("sound")
-                and not existing_value.get("sound")
-            ):
-                existing_value["sound"] = incoming_value["sound"]
-
-            changed += 1
-            continue
-
-        # --------------------------------------------------
-        # Существующая строка:
-        # "Вопрос": ""
-        # --------------------------------------------------
-        if isinstance(existing_value, str):
-            # Если remote пришёл объектом с sound,
-            # сохраняем объект, чтобы не потерять звук.
-            if isinstance(incoming_value, dict):
-                new_value = dict(incoming_value)
-                new_value["answer"] = incoming_answer
-                quiz[existing_question] = new_value
+        # Существующая запись — обычная пустая строка.
+        elif isinstance(current, str) and not current.strip():
+            if isinstance(incoming, dict):
+                quiz[existing_question] = dict(incoming)
             else:
                 quiz[existing_question] = incoming_answer
-
             changed += 1
-            continue
 
-        # --------------------------------------------------
-        # Неизвестный формат старого значения.
-        # Безопасно заменяем его incoming-значением,
-        # только если incoming содержит ответ.
-        # --------------------------------------------------
-        quiz[existing_question] = incoming_value
-        changed += 1
+        else:
+            # Для неизвестного старого формата безопасно сохраняем ответ.
+            quiz[existing_question] = incoming_answer
+            changed += 1
 
-    # ---------------------------------------
-    # Удаляем дубли после merge.
-    # ---------------------------------------
-    deduplicated: dict[str, Any] = {}
-    normalized_seen: set[str] = set()
+    # Сначала записи с ответами, затем пустые.
+    cfg_data["quiz"] = dict(sorted(
+        quiz.items(),
+        key=lambda kv: (not has_answer(kv[1]), normalize_question(kv[0]))
+    ))
 
-    for question, value in quiz.items():
-        normalized = _normalize_quiz_question(question)
-
-        if normalized in normalized_seen:
-            # Если первый дубль пустой, а этот имеет ответ —
-            # заменяем первый.
-            existing_key = next(
-                (
-                    k for k in deduplicated
-                    if _normalize_quiz_question(k) == normalized
-                ),
-                None,
-            )
-
-            if existing_key is not None:
-                if (
-                    _answer_is_empty(deduplicated[existing_key])
-                    and not _answer_is_empty(value)
-                ):
-                    deduplicated[existing_key] = value
-
-            continue
-
-        normalized_seen.add(normalized)
-        deduplicated[question] = value
-
-    quiz = deduplicated
-
-    # ---------------------------------------
-    # Сортировка:
-    # сначала вопросы с ответами,
-    # затем пустые.
-    # ---------------------------------------
-    cfg_data["quiz"] = dict(
-        sorted(
-            quiz.items(),
-            key=lambda kv: (
-                _answer_is_empty(kv[1]),
-                _normalize_quiz_question(kv[0]),
-            ),
-        )
-    )
-
-    # ---------------------------------------
-    # Сохраняем ВСЕГДА после merge.
-    # ---------------------------------------
     try:
         config_path.write_text(
-            json.dumps(
-                cfg_data,
-                ensure_ascii=False,
-                indent=2,
-            ) + "\n",
+            json.dumps(cfg_data, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
     except Exception as e:
-        print(
-            f"[merge] Не удалось сохранить {config_path.name}: {e}",
-            file=sys.stderr,
-        )
+        print(f"[merge] Не удалось сохранить {config_path.name}: {e}", file=sys.stderr)
         return 0
 
     if changed:
-        print(
-            f"[merge] Успешно сохранено изменений: {changed}"
-        )
-
+        print(f"[merge] Изменений в {config_path.name}: {changed}")
     return changed
 
-    # Сортировка: сначала вопросы с ответами, потом без; внутри по алфавиту.
-    def _is_empty(v: Any) -> bool:
-        if isinstance(v, str):
-            return not v.strip()
-        if isinstance(v, dict):
-            return not str(v.get("answer", "")).strip()
-        return True
+def _extract_verified_quiz_answer(text: str) -> str | None:
+    """Извлекает ответ из строки «Правильный ответ: ...»."""
+    m = re.search(r"правильный\s+ответ\s*(?:[:\-—–]\s*|\s+)(.+?)\s*$", text, re.IGNORECASE)
+    if not m:
+        return None
+    answer = _strip_mc_codes(m.group(1)).strip().strip('\"\'«»')
+    return answer or None
 
-    cfg_data["quiz"] = dict(sorted(
-        quiz.items(),
-        key=lambda kv: (_is_empty(kv[1]), kv[0].lower()),
-    ))
-    config_path.write_text(
-        json.dumps(cfg_data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    return changed
+def fetch_remote_quiz(url: str, dest: Path, config_path: Path | None = None) -> bool:
+    """Скачивает общую викторину и всегда выполняет merge в responses.json.
 
-
-def fetch_remote_quiz(
-    url: str,
-    dest: Path,
-    config_path: Path | None = None
-) -> bool:
-    """Скачивает общую викторину и ВСЕГДА пытается сделать merge
-    в responses.json.
-
-    Важно:
-    Даже если remote_quiz.json уже такой же, как скачанный сейчас,
-    merge всё равно выполняется.
-
-    Это исправляет ситуацию, когда:
-    - ответы уже есть в quiz_shared.json;
-    - remote_quiz.json уже был скачан раньше;
-    - responses.json был очищен/изменён;
-    - старый код видел одинаковый remote-файл и делал return False,
-      поэтому ответы больше никогда не попадали в responses.json.
+    Важно: даже если remote_quiz.json уже совпадает с удалённым файлом,
+    merge всё равно выполняется. Это позволяет восстановить/дозаполнить
+    ответы в responses.json без изменения самого remote-файла.
     """
     try:
         req = urllib.request.Request(
             url,
-            headers={
-                "User-Agent": "minecraftotvet/1.0"
-            },
+            headers={"User-Agent": "minecraftotvet/1.0"},
         )
-
         with urllib.request.urlopen(req, timeout=15) as r:
             data = r.read().decode("utf-8")
 
         parsed = json.loads(data)
-
         if not isinstance(parsed, dict):
             print(
                 f"[remote] {url}: ожидался JSON-объект, пропускаю.",
@@ -862,63 +773,33 @@ def fetch_remote_quiz(
             )
             return False
 
-        # ---------------------------------------
-        # Обновляем remote_quiz.json только если
-        # содержимое реально изменилось.
-        # ---------------------------------------
-        old = (
-            dest.read_text(encoding="utf-8")
-            if dest.exists()
-            else ""
-        )
-
+        old = dest.read_text(encoding="utf-8") if dest.exists() else ""
         remote_changed = old.strip() != data.strip()
 
         if remote_changed:
-            dest.write_text(
-                data,
-                encoding="utf-8",
-            )
-
+            dest.write_text(data, encoding="utf-8")
             print(
-                f"[remote] Обновлено {len(parsed)} записей викторины: "
-                f"{dest.name}"
+                f"[remote] Обновлено {len(parsed)} записей викторины: {dest.name}"
             )
         else:
             print(
-                f"[remote] {dest.name} уже актуален "
-                f"({len(parsed)} записей)"
+                f"[remote] {dest.name} уже актуален ({len(parsed)} записей)"
             )
 
-        # ---------------------------------------
-        # ВАЖНО:
-        # MERGE ВЫПОЛНЯЕМ ВСЕГДА.
-        # Не только если remote_changed == True.
-        # ---------------------------------------
+        # Критически важно: merge находится ВНЕ проверки remote_changed.
         merged = 0
+        if config_path is not None:
+            merged = _merge_quiz_into_config(parsed, config_path)
+            if merged:
+                print(
+                    f"[remote] Добавлено/обновлено в responses.json: {merged}"
+                )
 
-        if config_path:
-            merged = _merge_quiz_into_config(
-                parsed,
-                config_path,
-            )
-
-            print(
-                f"[remote] Проверено записей для merge: {len(parsed)}, "
-                f"изменено в responses.json: {merged}"
-            )
-
-        # Возвращаем True, если был изменён remote-файл
-        # ИЛИ responses.json получил новые ответы.
         return remote_changed or merged > 0
 
     except Exception as e:
-        print(
-            f"[remote] Ошибка обновления с {url}: {e}",
-            file=sys.stderr,
-        )
+        print(f"[remote] Ошибка обновления с {url}: {e}", file=sys.stderr)
         return False
-
 
 def sync_remote_quiz(cfg: Config) -> bool:
     """Разово, синхронно, скачивает удалённую викторину. Возвращает True,
@@ -1038,6 +919,7 @@ def main() -> None:
     # самое сообщение не отправляется (анти-спам). Правило с ignore_dedup=True
     # полностью пропускает эту проверку.
     last_answered_at: dict[tuple[str, str], float] = {}
+    last_quiz_question: str | None = None
 
     for line in follow(log_path):
         cfg.maybe_reload()
@@ -1047,6 +929,32 @@ def main() -> None:
         if not parsed:
             continue
         nick, text = parsed
+
+        # Запоминаем вопрос, а затем сохраняем серверный «Правильный ответ: ...».
+        if _QUIZ_LINE_MARK.lower() in text.lower():
+            verified = _extract_verified_quiz_answer(text)
+            marker_pos = text.lower().find(_QUIZ_LINE_MARK.lower())
+            question = text[marker_pos + len(_QUIZ_LINE_MARK):].strip()
+            if verified is None:
+                if question and not any(x in question.lower() for x in _QUIZ_SKIP_SUBSTR) and not any(x in question.lower() for x in _MATH_SKIP):
+                    last_quiz_question = question
+            elif last_quiz_question:
+                saved = _merge_quiz_into_config({last_quiz_question: verified}, CONFIG_PATH)
+                if saved:
+                    print(f"[quiz] Сохранён ответ: {last_quiz_question} -> {verified}")
+                    cfg.load()
+                last_quiz_question = None
+            continue
+
+        verified = _extract_verified_quiz_answer(text)
+        if verified is not None:
+            if last_quiz_question:
+                saved = _merge_quiz_into_config({last_quiz_question: verified}, CONFIG_PATH)
+                if saved:
+                    print(f"[quiz] Сохранён ответ: {last_quiz_question} -> {verified}")
+                    cfg.load()
+                last_quiz_question = None
+            continue
 
         if cfg.settings.ignore_own_username and \
                 nick.lower() == cfg.settings.ignore_own_username.lower():
