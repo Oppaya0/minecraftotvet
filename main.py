@@ -938,6 +938,12 @@ def main() -> None:
             if verified is None:
                 if question and not any(x in question.lower() for x in _QUIZ_SKIP_SUBSTR) and not any(x in question.lower() for x in _MATH_SKIP):
                     last_quiz_question = question
+                    # Сразу фиксируем вопрос в quiz (с пустым ответом), чтобы он не
+                    # потерялся, если раунд закончится без "Правильный ответ: ..."
+                    # (например, кто-то ответил мгновенно и сервер не прислал реплику).
+                    if _merge_quiz_into_config({question: ""}, CONFIG_PATH) > 0:
+                        print(f"[collect] Новый вопрос замечен вживую: {question}")
+                        cfg.load()
             elif last_quiz_question:
                 saved = _merge_quiz_into_config({last_quiz_question: verified}, CONFIG_PATH)
                 if saved:
